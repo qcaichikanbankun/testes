@@ -3,33 +3,43 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>刻印OCRテスト</title>
-    <!-- ★最新の軽量・高速版 AIエンジンに変更 -->
-    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <title>刻印OCRテスト v4</title>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.1.4/dist/tesseract.min.js"></script>
     <style>
         body { margin: 0; background: #111; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }
-        h1 { font-size: 1.5rem; margin-bottom: 10px; }
+        h1 { font-size: 1.5rem; margin-bottom: 5px; }
+        p.hint { font-size: 0.9rem; color: #ccc; margin-bottom: 15px; text-align: center; }
+        
         .canvas-container { position: relative; width: 100%; max-width: 400px; aspect-ratio: 1/1; border: 3px solid #007bff; border-radius: 10px; overflow: hidden; margin-bottom: 20px; }
         #canvas { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
         
+        /* ★追加：読み取りターゲット枠 */
+        .guide-box { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 80%; height: 25%; border: 3px solid #ff3b30; box-sizing: border-box; box-shadow: 0 0 0 9999px rgba(0,0,0,0.5); z-index: 10; pointer-events: none; }
+        .guide-box::after { content: "この枠内に刻印を合わせる"; position: absolute; top: -25px; left: 0; width: 100%; text-align: center; color: #ff3b30; font-weight: bold; font-size: 0.9rem; }
+
         .controls { width: 100%; max-width: 400px; background: #222; padding: 15px; border-radius: 10px; box-sizing: border-box; }
         .slider-label { display: flex; justify-content: space-between; font-weight: bold; margin-bottom: 10px; }
         input[type="range"] { width: 100%; margin-bottom: 20px; }
         
         #result-box { width: 100%; max-width: 400px; background: #fff; color: #000; padding: 20px; border-radius: 10px; font-size: 2rem; font-weight: bold; text-align: center; min-height: 60px; box-sizing: border-box; margin-top: 10px; word-break: break-all; }
-        #status { color: #ffeb3b; font-weight: bold; margin-top: 10px; }
+        #status { color: #ffeb3b; font-weight: bold; margin-top: 10px; text-align: center; }
 
-        #start-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #111; display: flex; justify-content: center; align-items: center; z-index: 9999; font-size: 2rem; font-weight: bold; color: white; cursor: pointer; }
+        #start-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #007bff; display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 9999; color: white; cursor: pointer; }
     </style>
 </head>
 <body>
 
-    <div id="start-overlay" onclick="startApp()">タップして開始</div>
+    <div id="start-overlay" onclick="startApp()">
+        <h2 style="margin:0; font-size:3rem;">タップして開始</h2>
+        <p style="margin-top:10px; font-size:1.2rem;">（強化版 v4）</p>
+    </div>
 
-    <h1>刻印 AIスキャンテスト</h1>
+    <h1>刻印 AIスキャンテスト v4</h1>
+    <p class="hint">iPadから30cm離し、少し傾けて影を作ってください</p>
     
     <div class="canvas-container">
         <canvas id="canvas"></canvas>
+        <div class="guide-box"></div>
     </div>
 
     <div class="controls">
@@ -47,6 +57,11 @@
 const video = document.createElement("video");
 const canvasElement = document.getElementById("canvas");
 const ctx = canvasElement.getContext("2d", { willReadFrequently: true });
+
+// AIに渡すための「切り抜き用」隠しキャンバス
+const cropCanvas = document.createElement("canvas");
+const cropCtx = cropCanvas.getContext("2d");
+
 const thresholdSlider = document.getElementById("threshold");
 const thresholdVal = document.getElementById("threshold-val");
 const resultBox = document.getElementById("result-box");
@@ -59,43 +74,29 @@ thresholdSlider.addEventListener('input', (e) => {
     thresholdVal.innerText = e.target.value;
 });
 
-// 1. ユーザーのタップで開始
 async function startApp() {
     document.getElementById("start-overlay").style.display = "none";
     statusText.innerText = "カメラを起動しています...";
 
     try {
-        // ★タップ直後に、何よりも先にカメラを起動する（iOSブロック対策）
         await startCamera();
-
-        // カメラが起動してから裏側でゆっくりAIを準備する
-        statusText.innerText = "AIエンジンをダウンロード中...(数秒かかります)";
+        statusText.innerText = "AIエンジンを準備中...";
         
-        ocrWorker = await Tesseract.createWorker('eng', 1, {
-            logger: m => {
-                if (m.status === "recognizing text") {
-                    statusText.innerText = "かざしてください (自動読取中)";
-                    statusText.style.color = "#28a745";
-                }
-            }
-        });
-        
+        ocrWorker = await Tesseract.createWorker();
+        await ocrWorker.loadLanguage('eng');
+        await ocrWorker.initialize('eng');
         await ocrWorker.setParameters({
             tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-',
+            tessedit_pageseg_mode: 7, // ★追加：1行だけを読み取るモード（精度向上）
         });
 
-        statusText.innerText = "かざしてください (自動読取中)";
+        statusText.innerText = "赤い枠に刻印をかざしてください";
         statusText.style.color = "#28a745";
-
     } catch (err) {
-        // エラー内容がundefinedにならないように修正
-        let errorMsg = err.message ? err.message : String(err);
-        statusText.innerText = "エラー: " + errorMsg;
-        console.error(err);
+        statusText.innerText = "エラー: " + (err.message || String(err));
     }
 }
 
-// 2. カメラの起動処理
 async function startCamera() {
     const stream = await navigator.mediaDevices.getUserMedia({ 
         video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 640 } },
@@ -105,34 +106,47 @@ async function startCamera() {
     video.setAttribute("playsinline", true);
     video.setAttribute("autoplay", true);
     video.muted = true;
-    
     await video.play();
     requestAnimationFrame(processFrame);
 }
 
-// 3. 映像のリアルタイム白黒化 ＆ OCR実行
 function processFrame() {
     if (video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth > 0) {
         canvasElement.width = video.videoWidth;
         canvasElement.height = video.videoHeight;
         
+        // 映像全体を描画
         ctx.drawImage(video, 0, 0, canvasElement.width, canvasElement.height);
         
+        // 1. 全体を白黒化
         let imageData = ctx.getImageData(0, 0, canvasElement.width, canvasElement.height);
         let data = imageData.data;
         let threshold = parseInt(thresholdSlider.value);
 
         for (let i = 0; i < data.length; i += 4) {
             let brightness = (data[i] * 0.299) + (data[i+1] * 0.587) + (data[i+2] * 0.114);
+            // コントラストを少し強めてから2値化
             let color = brightness < threshold ? 0 : 255;
             data[i] = data[i+1] = data[i+2] = color;
         }
         ctx.putImageData(imageData, 0, 0);
 
-        if (ocrWorker && !isProcessing) {
+        // 2. 赤い枠の部分だけを切り取ってAIに渡す（処理高速化＆ノイズ除去）
+        let cropW = canvasElement.width * 0.8;
+        let cropH = canvasElement.height * 0.25;
+        let cropX = canvasElement.width * 0.1;
+        let cropY = canvasElement.height * 0.375;
+
+        cropCanvas.width = cropW;
+        cropCanvas.height = cropH;
+        cropCtx.drawImage(canvasElement, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+        // 3. AIによる読み取り
+        if (ocrWorker && !isProcessing && statusText.style.color === "rgb(40, 167, 69)") {
             isProcessing = true;
-            ocrWorker.recognize(canvasElement).then(({ data: { text } }) => {
+            ocrWorker.recognize(cropCanvas).then(({ data: { text } }) => {
                 let cleanText = text.replace(/[^A-Za-z0-9-]/g, '').trim();
+                // 2文字以上のアルファベット/数字が読めた時だけ表示
                 if (cleanText.length >= 2) {
                     resultBox.innerText = cleanText;
                 }
