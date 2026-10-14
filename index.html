@@ -9,18 +9,24 @@
     <style>
         body { margin: 0; background: #111; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }
         h1 { font-size: 1.5rem; margin-bottom: 10px; }
-        .canvas-container { position: relative; width: 100%; max-width: 400px; aspect-ratio: 1/1; border: 3px solid #007bff; border-radius: 10px; overflow: hidden; margin-bottom: 20px; background: #222; display: flex; justify-content: center; align-items: center; text-align: center; }
-        #canvas { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+        .canvas-container { position: relative; width: 100%; max-width: 400px; aspect-ratio: 1/1; border: 3px solid #007bff; border-radius: 10px; overflow: hidden; margin-bottom: 20px; }
+        #canvas { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); /* インカメラ用の反転 */ }
         
         .controls { width: 100%; max-width: 400px; background: #222; padding: 15px; border-radius: 10px; box-sizing: border-box; }
         .slider-label { display: flex; justify-content: space-between; font-weight: bold; margin-bottom: 10px; }
         input[type="range"] { width: 100%; margin-bottom: 20px; }
         
         #result-box { width: 100%; max-width: 400px; background: #fff; color: #000; padding: 20px; border-radius: 10px; font-size: 2rem; font-weight: bold; text-align: center; min-height: 60px; box-sizing: border-box; margin-top: 10px; word-break: break-all; }
-        #status { color: #ffeb3b; font-weight: bold; margin-top: 10px; text-align: center; padding: 0 10px; }
+        #status { color: #ffeb3b; font-weight: bold; margin-top: 10px; }
+
+        /* Safariブロック回避用の開始画面 */
+        #start-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #111; display: flex; justify-content: center; align-items: center; z-index: 9999; font-size: 2rem; font-weight: bold; color: white; cursor: pointer; }
     </style>
 </head>
 <body>
+
+    <!-- この画面をタップしてからカメラを起動する -->
+    <div id="start-overlay" onclick="startApp()">タップして開始</div>
 
     <h1>刻印 AIスキャンテスト</h1>
     
@@ -36,7 +42,7 @@
         <input type="range" id="threshold" min="0" max="255" value="128">
     </div>
 
-    <div id="status">AI準備中...</div>
+    <div id="status">待機中...</div>
     <div id="result-box">（ここに文字が出ます）</div>
 
 <script>
@@ -51,45 +57,54 @@ const statusText = document.getElementById("status");
 let ocrWorker = null;
 let isProcessing = false;
 
-// 1. AIエンジンの初期化
-(async () => {
+// スライダーの表示更新
+thresholdSlider.addEventListener('input', (e) => {
+    thresholdVal.innerText = e.target.value;
+});
+
+// 1. ユーザーのタップで全てを開始する（Safariセキュリティ対策）
+async function startApp() {
+    document.getElementById("start-overlay").style.display = "none";
+    statusText.innerText = "AIエンジン読み込み中...";
+
     try {
         ocrWorker = await Tesseract.createWorker('eng');
         await ocrWorker.setParameters({
             tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-',
         });
-        statusText.innerText = "カメラを起動中...";
-        startCamera();
-    } catch (e) {
-        statusText.innerText = "AI初期化エラー: " + e.message;
+        statusText.innerText = "カメラを起動しています...";
+        await startCamera();
+    } catch (err) {
+        statusText.innerText = "AI初期化エラー: " + err.message;
     }
-})();
+}
 
-thresholdSlider.addEventListener('input', (e) => {
-    thresholdVal.innerText = e.target.value;
-});
-
-// 2. インカメラの起動（エラー原因表示付き）
+// 2. カメラの起動処理
 async function startCamera() {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ 
-            video: { facingMode: "user", width: { ideal: 1080 }, height: { ideal: 1080 } } 
+            video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 640 } },
+            audio: false 
         });
         video.srcObject = stream;
         video.setAttribute("playsinline", true);
-        video.play();
+        video.setAttribute("autoplay", true);
+        video.muted = true;
+        
+        await video.play();
         statusText.innerText = "かざしてください (自動読取中)";
         statusText.style.color = "#28a745";
+        
         requestAnimationFrame(processFrame);
     } catch (err) {
-        statusText.style.color = "#dc3545";
-        statusText.innerHTML = "カメラ起動エラー:<br>" + err.name + "<br>" + err.message;
+        statusText.innerText = "カメラ起動エラー: " + err.name + " - " + err.message;
+        console.error(err);
     }
 }
 
 // 3. 映像のリアルタイム白黒化 ＆ OCR実行
 function processFrame() {
-    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+    if (video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth > 0) {
         canvasElement.width = video.videoWidth;
         canvasElement.height = video.videoHeight;
         
@@ -99,6 +114,7 @@ function processFrame() {
         let data = imageData.data;
         let threshold = parseInt(thresholdSlider.value);
 
+        // 画像を白黒（2値化）に変換
         for (let i = 0; i < data.length; i += 4) {
             let brightness = (data[i] * 0.299) + (data[i+1] * 0.587) + (data[i+2] * 0.114);
             let color = brightness < threshold ? 0 : 255;
@@ -106,9 +122,9 @@ function processFrame() {
         }
         ctx.putImageData(imageData, 0, 0);
 
+        // AIに文字を読ませる
         if (ocrWorker && !isProcessing) {
             isProcessing = true;
-            
             ocrWorker.recognize(canvasElement).then(({ data: { text } }) => {
                 let cleanText = text.replace(/[^A-Za-z0-9-]/g, '').trim();
                 if (cleanText.length >= 2) {
@@ -116,7 +132,6 @@ function processFrame() {
                 }
                 isProcessing = false;
             }).catch(e => {
-                console.error(e);
                 isProcessing = false;
             });
         }
